@@ -52,4 +52,17 @@ type Plugin struct {
 	Description     string           `json:"description" yaml:"description"`
 	ExtensionPoints []ExtensionPoint `json:"extensionPoints" yaml:"extensionPoints"`
 	Extensions      []Extension      `json:"extensions" yaml:"extensions"`
+	Listeners       []Listener       `json:"listeners" yaml:"listeners"`
+}
+
+type Event struct {
+	Id     string `json:"id" yaml:"id"`
+	Data   []byte `json:"data" yaml:"data"`
+	Source string `json:"source" yaml:"source"`
+	Target string `json:"target" yaml:"target"`
+}
+
+type Listener struct {
+	Event string `json:"event" yaml:"event"`
+	Func  string `json:"func" yaml:"func"`
 }
