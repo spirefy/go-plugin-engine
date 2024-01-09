@@ -254,6 +254,10 @@ func (e *Engine) Start() {
 	}
 }
 
+func (e *Engine) GetPlugins() map[string]map[string]*internalPlugin {
+	return e.plugins
+}
+
 func NewPluginEngine() *Engine {
 	plugins := make(map[string]map[string]*internalPlugin, 0)
 	unresolved := make(map[string][]*extension, 0)
