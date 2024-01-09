@@ -13,17 +13,17 @@ import (
 	"strings"
 )
 
-type ExtensionPoint struct {
+type extensionPoint struct {
 	types.ExtensionPoint
 	// Because this outer ExtensionPoint wrapper allows for host extension points, which are native to Go, a func pointer
 	// to call upon that extension point is necessary. This is not the typical wasm string func name to call, but an
 	// actual Go function provided by the host to be called
-	Func       func([]*Extension) error
-	Extensions []*Extension
+	Func       func([]*extension) error
+	Extensions []*extension
 	Plugin     *extism.Plugin
 }
 
-type Extension struct {
+type extension struct {
 	types.Extension
 	Plugin   *extism.Plugin
 	Resolved bool `json:"resolved" yaml:"resolved"`
@@ -37,8 +37,8 @@ type internalPlugin struct {
 
 type Engine struct {
 	plugins         map[string]map[string]*internalPlugin
-	extensionPoints []*ExtensionPoint
-	unresolved      map[string][]*Extension
+	extensionPoints []*extensionPoint
+	unresolved      map[string][]*extension
 }
 
 func contains(arr []string, str string) bool {
@@ -96,9 +96,9 @@ func (e *Engine) addPlugin(p *internalPlugin) {
 		// now add all of this plugins extensions to the unresolved list.. a call to engine.resolve() will then try to
 		// find/resolve all extensions and subsequently resolve all plugins
 		if nil != p.Details.Extensions && len(p.Details.Extensions) > 0 {
-			exs := make([]*Extension, 0)
+			exs := make([]*extension, 0)
 			for _, ex := range p.Details.Extensions {
-				ee := &Extension{
+				ee := &extension{
 					Extension: ex,
 					Plugin:    p.Plugin,
 					Resolved:  false,
@@ -113,7 +113,7 @@ func (e *Engine) addPlugin(p *internalPlugin) {
 		// that will tie this plugin instance to it as well.
 		if nil != p.Details.ExtensionPoints && len(p.Details.ExtensionPoints) > 0 {
 			for _, ep := range p.Details.ExtensionPoints {
-				eep := &ExtensionPoint{
+				eep := &extensionPoint{
 					ExtensionPoint: ep,
 					Func:           nil,
 					Extensions:     nil,
@@ -234,7 +234,7 @@ func (e *Engine) resolve() {
 }
 
 // RegisterHostExtensionPoint
-func (e *Engine) RegisterHostExtensionPoint(ep ExtensionPoint) {
+func (e *Engine) RegisterHostExtensionPoint(ep extensionPoint) {
 	e.extensionPoints = append(e.extensionPoints, &ep)
 }
 
@@ -256,7 +256,7 @@ func (e *Engine) Start() {
 
 func NewPluginEngine() *Engine {
 	plugins := make(map[string]map[string]*internalPlugin, 0)
-	unresolved := make(map[string][]*Extension, 0)
+	unresolved := make(map[string][]*extension, 0)
 
 	engine := &Engine{
 		plugins:    plugins,
