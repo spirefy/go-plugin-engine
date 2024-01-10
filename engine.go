@@ -13,32 +13,33 @@ import (
 	"strings"
 )
 
-type extensionPoint struct {
+type ExtensionPoint struct {
 	types.ExtensionPoint
 	// Because this outer ExtensionPoint wrapper allows for host extension points, which are native to Go, a func pointer
 	// to call upon that extension point is necessary. This is not the typical wasm string func name to call, but an
 	// actual Go function provided by the host to be called
-	Func       func([]*extension) error
-	Extensions []*extension
+	Func       func([]*Extension) error
+	Extensions []*Extension
 	Plugin     *extism.Plugin
 }
 
-type extension struct {
+type Extension struct {
 	types.Extension
 	Plugin   *extism.Plugin
 	Resolved bool `json:"resolved" yaml:"resolved"`
 }
 
-type internalPlugin struct {
+type Plugin struct {
 	Details  types.Plugin
 	Plugin   *extism.Plugin
 	Resolved bool
 }
 
 type Engine struct {
-	plugins         map[string]map[string]*internalPlugin
-	extensionPoints []*extensionPoint
-	unresolved      map[string][]*extension
+	plugins         map[string]map[string]*Plugin
+	extensionPoints []*ExtensionPoint
+	unresolved      map[string][]*Extension
+	hostFuncs       []extism.HostFunction
 }
 
 func contains(arr []string, str string) bool {
@@ -82,12 +83,12 @@ func findFilesWithExtensions(root string, extensions []string) ([]string, error)
 // at the name and version provided does not yet exist, the map of internalPlugin objects is created.
 // It's important to note that if a plugin already exists at the name and version intersection, it is replaced. This
 // should allow for reloading (and eventual GC of old plugins as they are replaced) if need be.
-func (e *Engine) addPlugin(p *internalPlugin) {
+func (e *Engine) addPlugin(p *Plugin) {
 	if nil != e.plugins && nil != p {
 		pv := e.plugins[p.Details.Name]
 
 		if nil == pv {
-			pv = make(map[string]*internalPlugin, 0)
+			pv = make(map[string]*Plugin, 0)
 			e.plugins[p.Details.Name] = pv
 		}
 
@@ -96,9 +97,9 @@ func (e *Engine) addPlugin(p *internalPlugin) {
 		// now add all of this plugins extensions to the unresolved list.. a call to engine.resolve() will then try to
 		// find/resolve all extensions and subsequently resolve all plugins
 		if nil != p.Details.Extensions && len(p.Details.Extensions) > 0 {
-			exs := make([]*extension, 0)
+			exs := make([]*Extension, 0)
 			for _, ex := range p.Details.Extensions {
-				ee := &extension{
+				ee := &Extension{
 					Extension: ex,
 					Plugin:    p.Plugin,
 					Resolved:  false,
@@ -113,7 +114,7 @@ func (e *Engine) addPlugin(p *internalPlugin) {
 		// that will tie this plugin instance to it as well.
 		if nil != p.Details.ExtensionPoints && len(p.Details.ExtensionPoints) > 0 {
 			for _, ep := range p.Details.ExtensionPoints {
-				eep := &extensionPoint{
+				eep := &ExtensionPoint{
 					ExtensionPoint: ep,
 					Func:           nil,
 					Extensions:     nil,
@@ -183,7 +184,7 @@ func (e *Engine) Load(path string) error {
 			continue
 		}
 
-		_, data, err := plug.Call("pluginInit", nil)
+		_, data, err := plug.Call("register", nil)
 
 		if nil != err {
 			fmt.Println("Error calling plugin: ", err)
@@ -198,7 +199,7 @@ func (e *Engine) Load(path string) error {
 				fmt.Println("Error unmarshalling plugin data: ", er)
 				continue
 			} else {
-				ip := &internalPlugin{
+				ip := &Plugin{
 					Details:  *p,
 					Plugin:   plug,
 					Resolved: false,
@@ -234,38 +235,91 @@ func (e *Engine) resolve() {
 }
 
 // RegisterHostExtensionPoint
-func (e *Engine) RegisterHostExtensionPoint(ep extensionPoint) {
-	e.extensionPoints = append(e.extensionPoints, &ep)
+func (e *Engine) RegisterHostExtensionPoint(id, name, description string, f func([]*Extension) error) {
+	ep := &ExtensionPoint{
+		ExtensionPoint: types.ExtensionPoint{
+			Id:          id,
+			Description: description,
+			Name:        name,
+		},
+		Func: f,
+	}
+
+	e.extensionPoints = append(e.extensionPoints, ep)
 }
 
 // Start
 // This receiver function is called whenever the consuming application is ready to start any plugins that are set to
 // startOnLoad true. This will kick off extension point extensions being executed for those with start on load
 func (e *Engine) Start() {
+	fmt.Println("Plugin Engine starting")
+
 	for _, ep := range e.extensionPoints {
-		if ep.StartOnLoad {
-			if nil != ep.Func {
-				err := ep.Func(ep.Extensions)
-				if nil != err {
-					fmt.Println("Error calling extension point: ", err)
-				}
+		if nil != ep.Func {
+			fmt.Println("Host Func for EP")
+			err := ep.Func(ep.Extensions)
+			if nil != err {
+				fmt.Println("We got an error calling host extension point function: ", err)
 			}
+		} else if len(ep.FuncName) > 0 {
+			fmt.Println("We have an EP func name in the plugin to call: ", ep.FuncName)
 		}
 	}
 }
 
-func (e *Engine) GetPlugins() map[string]map[string]*internalPlugin {
+func (e *Engine) GetPlugins() map[string]map[string]*Plugin {
 	return e.plugins
 }
 
-func NewPluginEngine() *Engine {
-	plugins := make(map[string]map[string]*internalPlugin, 0)
-	unresolved := make(map[string][]*extension, 0)
+func (e *Engine) SendEvent(event string, data []byte) error {
+	fmt.Println("Sending data to event: ", event)
+	if nil != data && len(data) > 0 {
+		fmt.Println("Data size: ", len(data))
+	}
 
+	return nil
+}
+
+func (e *Engine) CallExtensionFunc(ex types.Extension, data []byte) error {
+	return nil
+}
+
+func NewPluginEngine() *Engine {
+	plugins := make(map[string]map[string]*Plugin, 0)
+	unresolved := make(map[string][]*Extension, 0)
+
+	// instantiate as we need this in the host functions
 	engine := &Engine{
 		plugins:    plugins,
 		unresolved: unresolved,
 	}
+
+	sendEvent := extism.NewHostFunctionWithStack(
+		"sendEvent",
+		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
+			event, err := p.ReadString(stack[0])
+			if nil != err {
+				// TODO: Figure out how to handle this correctly
+				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST sendEvent FUNCTION: ", err)
+			}
+
+			data, err2 := p.ReadBytes(stack[1])
+			if nil != err2 {
+				// TODO: Figure out how to handle this correctly
+				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST sendEvent FUNCTION: ", err2)
+			}
+
+			err = engine.SendEvent(event, data)
+
+			if nil != err {
+				fmt.Println("ERROR SENDING EVENT: ", event, err)
+			}
+		},
+		[]extism.ValueType{extism.ValueTypeI32, extism.ValueTypeI64}, nil,
+	)
+
+	// add host functions
+	engine.hostFuncs = []extism.HostFunction{sendEvent}
 
 	/**
 	kvStore := make(map[string][]byte)
