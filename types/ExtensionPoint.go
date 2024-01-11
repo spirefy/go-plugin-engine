@@ -19,4 +19,9 @@ type ExtensionPoint struct {
 	// each extension point to iterate through all resolved extensions and call those extensions if that is the way
 	// the extension point works.
 	FuncName string `json:"funcName"`
+
+	// if true, after all plugins are loaded and all extensions resolved, this extension point (and any others set to
+	// true) have their FuncName functions called. This allows ExtensionPoints to be executed right away rather than
+	// dynamically via some extension code that calls them.
+	StartOnLoad bool `json:"startOnLoad"`
 }

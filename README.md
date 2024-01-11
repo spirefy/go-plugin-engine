@@ -24,3 +24,18 @@ Extension point:
   and can add events, respond to events, etc just the same. 
 
 
+
+Extension:
+  Extensions are how plugins can add contributions to plugins that provide ExtensionPoint's. Extensions are the implementation (typically) to the ExtensionPoint's contract (interface, etc).
+  Plugin developers would determine the ExtensionPoint(s) to be contributed to and follow any details regarding the structure an ExtensionPoint expects to pass to the Extension, and any return
+  structure. This is ALWAYS in the form of a []byte and it is up to the developer of the plugin Extension to ensure proper marshal and unmarshal of data at both ends. Hopefully ExtensionPoint 
+  developers provide plenty of details with regards to the purpose of the ExtensionPoint, the structures expected as parameters and return values, and so on.
+
+
+
+
+EventListener and Event:
+  The engine supports the ability for plugins to register listeners, which are functions that take in an event string value, and a data []byte. It is up to the sender of the event to marshal
+  the event structure into a []byte to send it. It is up to each listener to reverse that process.. unmarshal the json back into the appropriate structure to utilize the data within.
+  Plugins can call the provided host function SendEvent using the PluginEngine PDK for their specific language. The PDK wraps several host functions to abstract away the Extism PDK particulars
+  for setting up parameters correctly to be passed to the host function and any return value. 

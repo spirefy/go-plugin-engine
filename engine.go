@@ -127,6 +127,12 @@ func (e *Engine) addPlugin(p *Plugin) {
 	}
 }
 
+type mytyp struct {
+	Name  string
+	Age   int64
+	Alive bool
+}
+
 // Load
 func (e *Engine) Load(path string) error {
 	// First make sure that path is NOT a URL to a single plugin file
@@ -162,6 +168,13 @@ func (e *Engine) Load(path string) error {
 		}
 	}(cache, ctx)
 
+	config := extism.PluginConfig{
+		EnableWasi:    true,
+		ModuleConfig:  wazero.NewModuleConfig(),
+		RuntimeConfig: wazero.NewRuntimeConfig().WithCompilationCache(cache),
+		LogLevel:      extism.LogLevelDebug,
+	}
+
 	for _, file := range files {
 		manifest := extism.Manifest{
 			Wasm: []extism.Wasm{
@@ -171,13 +184,44 @@ func (e *Engine) Load(path string) error {
 			},
 		}
 
-		config := extism.PluginConfig{
-			EnableWasi:    true,
-			ModuleConfig:  wazero.NewModuleConfig(),
-			RuntimeConfig: wazero.NewRuntimeConfig().WithCompilationCache(cache),
-		}
+		sendEvent := extism.NewHostFunctionWithStack(
+			"sendevent",
+			func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
+				event, err := p.ReadString(stack[0])
+				if nil != err {
+					// TODO: Figure out how to handle this correctly
+					fmt.Println("ERROR CALLING FROM PLUGIN TO HOST sendEvent FUNCTION: ", err)
+				}
 
-		plug, err := extism.NewPlugin(ctx, manifest, config, []extism.HostFunction{})
+				data, err2 := p.ReadBytes(stack[1])
+				if nil != err2 {
+					// TODO: Figure out how to handle this correctly
+					fmt.Println("ERROR CALLING FROM PLUGIN TO HOST sendEvent FUNCTION: ", err2)
+				}
+
+				m := mytyp{}
+				json.Unmarshal(data, &m)
+				fmt.Println("event: ", event)
+				if nil != data {
+					fmt.Println("DATA: ", m)
+				}
+				/*
+					 err = SendEvent(event, data)
+
+					 if nil != err {
+						fmt.Println("ERROR SENDING EVENT: ", event, err)
+					}
+
+				*/
+			},
+			[]extism.ValueType{extism.ValueTypeI64, extism.ValueTypeI64}, []extism.ValueType{extism.ValueTypeI64},
+		)
+		sendEvent.SetNamespace("extism:host/user")
+
+		// add host functions
+		hostFuncs := []extism.HostFunction{sendEvent}
+
+		plug, err := extism.NewPlugin(ctx, manifest, config, hostFuncs)
 
 		if err != nil {
 			fmt.Printf("Failed to initialize plugin: %v\n", err)
@@ -235,6 +279,11 @@ func (e *Engine) resolve() {
 }
 
 // RegisterHostExtensionPoint
+//
+// This method allows a host/client application that is using the Plugin Engine to register extension points. This is
+// useful if the host/client app has some specific things it wants to allow anchor points for plugins to attach to.
+// Ideally a host/client app may ship/install/start with plugins already, but this gives the ability for the host/client
+// to have native code functions tied to extension points that are then filled by plugin extensions.
 func (e *Engine) RegisterHostExtensionPoint(id, name, description string, f func([]*Extension) error) {
 	ep := &ExtensionPoint{
 		ExtensionPoint: types.ExtensionPoint{
@@ -284,7 +333,12 @@ func (e *Engine) CallExtensionFunc(ex types.Extension, data []byte) error {
 	return nil
 }
 
-func NewPluginEngine() *Engine {
+// NewPluginEngine
+//
+// This function will create a new plugin engine instance. Passed in are host functions per the Extism (WASI)
+// Host Function spec. This allows consumers of this engine to provide its own host functions that plugins will be
+// able to utilize along with the plugin engine host functions.
+func NewPluginEngine(hostFuncs []extism.HostFunction) *Engine {
 	plugins := make(map[string]map[string]*Plugin, 0)
 	unresolved := make(map[string][]*Extension, 0)
 
@@ -292,10 +346,11 @@ func NewPluginEngine() *Engine {
 	engine := &Engine{
 		plugins:    plugins,
 		unresolved: unresolved,
+		hostFuncs:  hostFuncs,
 	}
 
 	sendEvent := extism.NewHostFunctionWithStack(
-		"sendEvent",
+		"sendevent",
 		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
 			event, err := p.ReadString(stack[0])
 			if nil != err {
@@ -315,11 +370,12 @@ func NewPluginEngine() *Engine {
 				fmt.Println("ERROR SENDING EVENT: ", event, err)
 			}
 		},
-		[]extism.ValueType{extism.ValueTypeI32, extism.ValueTypeI64}, nil,
+		[]extism.ValueType{extism.ValueTypeI64, extism.ValueTypeI64}, []extism.ValueType{extism.ValueTypeI64},
 	)
+	sendEvent.SetNamespace("host/user")
 
 	// add host functions
-	engine.hostFuncs = []extism.HostFunction{sendEvent}
+	engine.hostFuncs = append([]extism.HostFunction{sendEvent})
 
 	/**
 	kvStore := make(map[string][]byte)
