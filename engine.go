@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	extism "github.com/extism/go-sdk"
-	"github.com/spirefy/go-plugin-engine/types"
+	"github.com/spirefy/go-pdk/types"
 	"github.com/tetratelabs/wazero"
 	"net/url"
 	"os"
@@ -20,12 +20,12 @@ type ExtensionPoint struct {
 	// actual Go function provided by the host to be called
 	Func       func([]*Extension) error
 	Extensions []*Extension
-	Plugin     *extism.Plugin
+	Plugin     Plugin
 }
 
 type Extension struct {
 	types.Extension
-	Plugin   *extism.Plugin
+	Plugin   Plugin
 	Resolved bool `json:"resolved" yaml:"resolved"`
 }
 
@@ -35,9 +35,15 @@ type Plugin struct {
 	Resolved bool
 }
 
+type Listener struct {
+	types.Listener
+	Plugin Plugin
+}
+
 type Engine struct {
 	plugins         map[string]map[string]*Plugin
 	extensionPoints []*ExtensionPoint
+	listeners       map[string][]Listener
 	unresolved      map[string][]*Extension
 	hostFuncs       []extism.HostFunction
 }
@@ -101,7 +107,7 @@ func (e *Engine) addPlugin(p *Plugin) {
 			for _, ex := range p.Details.Extensions {
 				ee := &Extension{
 					Extension: ex,
-					Plugin:    p.Plugin,
+					Plugin:    *p,
 					Resolved:  false,
 				}
 				exs = append(exs, ee)
@@ -118,19 +124,13 @@ func (e *Engine) addPlugin(p *Plugin) {
 					ExtensionPoint: ep,
 					Func:           nil,
 					Extensions:     nil,
-					Plugin:         p.Plugin,
+					Plugin:         *p,
 				}
 
 				e.extensionPoints = append(e.extensionPoints, eep)
 			}
 		}
 	}
-}
-
-type mytyp struct {
-	Name  string
-	Age   int64
-	Alive bool
 }
 
 // Load
@@ -185,7 +185,7 @@ func (e *Engine) Load(path string) error {
 		}
 
 		sendEvent := extism.NewHostFunctionWithStack(
-			"sendevent",
+			"sendEvent",
 			func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
 				event, err := p.ReadString(stack[0])
 				if nil != err {
@@ -199,27 +199,37 @@ func (e *Engine) Load(path string) error {
 					fmt.Println("ERROR CALLING FROM PLUGIN TO HOST sendEvent FUNCTION: ", err2)
 				}
 
-				m := mytyp{}
-				json.Unmarshal(data, &m)
-				fmt.Println("event: ", event)
-				if nil != data {
-					fmt.Println("DATA: ", m)
+				if nil != err {
+					fmt.Println("ERROR SENDING EVENT: ", event, err)
 				}
-				/*
-					 err = SendEvent(event, data)
 
-					 if nil != err {
-						fmt.Println("ERROR SENDING EVENT: ", event, err)
-					}
-
-				*/
+				fmt.Println("Data: ", data)
 			},
 			[]extism.ValueType{extism.ValueTypeI64, extism.ValueTypeI64}, []extism.ValueType{extism.ValueTypeI64},
 		)
 		sendEvent.SetNamespace("extism:host/user")
 
+		callExtension := extism.NewHostFunctionWithStack(
+			"callExtension",
+			func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
+				data, err2 := p.ReadBytes(stack[0])
+				if nil != err2 {
+					// TODO: Figure out how to handle this correctly
+					fmt.Println("ERROR CALLING FROM PLUGIN TO HOST callExtension FUNCTION: ", err2)
+				}
+
+				if nil != err {
+					fmt.Println("ERROR SENDING EVENT: ", data, err)
+				}
+
+				fmt.Println("Data: ", data)
+			},
+			[]extism.ValueType{extism.ValueTypeI64}, []extism.ValueType{extism.ValueTypeI64},
+		)
+		callExtension.SetNamespace("extism:host/user")
+
 		// add host functions
-		hostFuncs := []extism.HostFunction{sendEvent}
+		hostFuncs := []extism.HostFunction{sendEvent, callExtension}
 
 		plug, err := extism.NewPlugin(ctx, manifest, config, hostFuncs)
 
@@ -250,6 +260,24 @@ func (e *Engine) Load(path string) error {
 				}
 
 				e.addPlugin(ip)
+
+				if nil != p.Listeners && len(p.Listeners) > 0 {
+					fmt.Println("There is a listener to add")
+					for _, l := range p.Listeners {
+						ll := Listener{
+							Listener: l,
+							Plugin:   *ip,
+						}
+
+						listeners := e.listeners[l.Event]
+						if nil == listeners {
+							listeners = make([]Listener, 0)
+						}
+
+						listeners = append(listeners, ll)
+						e.listeners[l.Event] = listeners
+					}
+				}
 			}
 		}
 	}
@@ -297,21 +325,23 @@ func (e *Engine) RegisterHostExtensionPoint(id, name, description string, f func
 	e.extensionPoints = append(e.extensionPoints, ep)
 }
 
-// Start
-// This receiver function is called whenever the consuming application is ready to start any plugins that are set to
-// startOnLoad true. This will kick off extension point extensions being executed for those with start on load
-func (e *Engine) Start() {
-	fmt.Println("Plugin Engine starting")
-
-	for _, ep := range e.extensionPoints {
-		if nil != ep.Func {
-			fmt.Println("Host Func for EP")
-			err := ep.Func(ep.Extensions)
+func (e *Engine) FireEvent(event string, data []byte) {
+	listeners := e.listeners[event]
+	if nil != listeners && len(listeners) > 0 {
+		for _, ll := range listeners {
+			fmt.Println("About to fire event to plugin: ", ll.Plugin.Details.Name)
+			status, data, err := ll.Plugin.Plugin.Call(ll.FuncName, data)
 			if nil != err {
-				fmt.Println("We got an error calling host extension point function: ", err)
+				fmt.Println("Error calling listener func in plugin: ", err)
+			} else {
+				if status == 0 {
+					if nil != data && len(data) > 0 {
+						fmt.Println("We got some data back from event handler: ", data)
+					}
+				} else {
+					fmt.Println("Return from event handler reports an error")
+				}
 			}
-		} else if len(ep.FuncName) > 0 {
-			fmt.Println("We have an EP func name in the plugin to call: ", ep.FuncName)
 		}
 	}
 }
@@ -320,16 +350,7 @@ func (e *Engine) GetPlugins() map[string]map[string]*Plugin {
 	return e.plugins
 }
 
-func (e *Engine) SendEvent(event string, data []byte) error {
-	fmt.Println("Sending data to event: ", event)
-	if nil != data && len(data) > 0 {
-		fmt.Println("Data size: ", len(data))
-	}
-
-	return nil
-}
-
-func (e *Engine) CallExtensionFunc(ex types.Extension, data []byte) error {
+func (e *Engine) CallExtensionFunc(ex Extension, data []byte) error {
 	return nil
 }
 
@@ -339,86 +360,19 @@ func (e *Engine) CallExtensionFunc(ex types.Extension, data []byte) error {
 // Host Function spec. This allows consumers of this engine to provide its own host functions that plugins will be
 // able to utilize along with the plugin engine host functions.
 func NewPluginEngine(hostFuncs []extism.HostFunction) *Engine {
-	plugins := make(map[string]map[string]*Plugin, 0)
-	unresolved := make(map[string][]*Extension, 0)
+	plugins := make(map[string]map[string]*Plugin)
+	unresolved := make(map[string][]*Extension)
+	listeners := make(map[string][]Listener)
+	extensionPoints := make([]*ExtensionPoint, 0)
 
 	// instantiate as we need this in the host functions
 	engine := &Engine{
-		plugins:    plugins,
-		unresolved: unresolved,
-		hostFuncs:  hostFuncs,
+		plugins:         plugins,
+		unresolved:      unresolved,
+		hostFuncs:       hostFuncs,
+		listeners:       listeners,
+		extensionPoints: extensionPoints,
 	}
-
-	sendEvent := extism.NewHostFunctionWithStack(
-		"sendevent",
-		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
-			event, err := p.ReadString(stack[0])
-			if nil != err {
-				// TODO: Figure out how to handle this correctly
-				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST sendEvent FUNCTION: ", err)
-			}
-
-			data, err2 := p.ReadBytes(stack[1])
-			if nil != err2 {
-				// TODO: Figure out how to handle this correctly
-				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST sendEvent FUNCTION: ", err2)
-			}
-
-			err = engine.SendEvent(event, data)
-
-			if nil != err {
-				fmt.Println("ERROR SENDING EVENT: ", event, err)
-			}
-		},
-		[]extism.ValueType{extism.ValueTypeI64, extism.ValueTypeI64}, []extism.ValueType{extism.ValueTypeI64},
-	)
-	sendEvent.SetNamespace("host/user")
-
-	// add host functions
-	engine.hostFuncs = append([]extism.HostFunction{sendEvent})
-
-	/**
-	kvStore := make(map[string][]byte)
-
-	kvRead := extism.NewHostFunctionWithStack(
-		"kv_read",
-		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
-			key, err := p.ReadString(stack[0])
-			if err != nil {
-				panic(err)
-			}
-
-			value, success := kvStore[key]
-			if !success {
-				value = []byte{0, 0, 0, 0}
-			}
-
-			stack[0], err = p.WriteBytes(value)
-		},
-		[]ValueType{ValueTypePTR},
-		[]ValueType{ValueTypePTR},
-	)
-
-	kvWrite := extism.NewHostFunctionWithStack(
-		"kv_write",
-		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
-			key, err := p.ReadString(stack[0])
-			if err != nil {
-				panic(err)
-			}
-
-			value, err := p.ReadBytes(stack[1])
-			if err != nil {
-				panic(err)
-			}
-
-			kvStore[key] = value
-		},
-		[]ValueType{ValueTypePTR, ValueTypePTR},
-		[]ValueType{},
-	)
-
-	*/
 
 	return engine
 }
