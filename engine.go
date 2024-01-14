@@ -35,16 +35,10 @@ type Plugin struct {
 	Resolved bool
 }
 
-type Listener struct {
-	types.Listener
-	Plugin Plugin
-}
-
 type Engine struct {
 	plugins         map[string]map[string]*Plugin
-	extensionPoints []*ExtensionPoint
-	listeners       map[string][]Listener
-	unresolved      map[string][]*Extension
+	extensionPoints map[string][]*ExtensionPoint
+	unresolved      []*Extension
 	hostFuncs       []extism.HostFunction
 }
 
@@ -100,20 +94,18 @@ func (e *Engine) addPlugin(p *Plugin) {
 
 		pv[p.Details.Version] = p
 
-		// now add all of this plugins extensions to the unresolved list.. a call to engine.resolve() will then try to
+		// now add all of this plugins extensions to the unresolved list... a call to engine.resolve() will then try to
 		// find/resolve all extensions and subsequently resolve all plugins
 		if nil != p.Details.Extensions && len(p.Details.Extensions) > 0 {
-			exs := make([]*Extension, 0)
 			for _, ex := range p.Details.Extensions {
 				ee := &Extension{
 					Extension: ex,
 					Plugin:    *p,
 					Resolved:  false,
 				}
-				exs = append(exs, ee)
-			}
 
-			e.unresolved[p.Details.Id] = exs
+				e.unresolved = append(e.unresolved, ee)
+			}
 		}
 
 		// now add all the plugins extension points to the engines extension points using the ExtensionPoint object
@@ -127,10 +119,41 @@ func (e *Engine) addPlugin(p *Plugin) {
 					Plugin:         *p,
 				}
 
-				e.extensionPoints = append(e.extensionPoints, eep)
+				eps := e.extensionPoints[ep.Id]
+				if nil == eps {
+					eps = make([]*ExtensionPoint, 0)
+				}
+
+				eps = append(eps, eep)
+				// reassign because exps may be a new larger ref.. has to be reassigned
+				e.extensionPoints[ep.Id] = eps
 			}
 		}
 	}
+}
+
+// GetExtensionsForExtensionPoint
+//
+// This method will look for a matching endpoint in the map of endpoints and if found and the version provided is not
+// nil, look for a matching version (TODO: version range may be added in future). If version is nil, the first
+// extension point's extensions are returned.
+func (e *Engine) GetExtensionsForExtensionPoint(epoint string, version *string) []*Extension {
+	fmt.Println("looking for extension point ", epoint)
+	eps := e.extensionPoints[epoint]
+	if nil != eps && len(eps) > 0 {
+		if nil != version && len(*version) > 0 {
+			for _, epVer := range eps {
+				if epVer.Version == *version {
+					return epVer.Extensions
+				}
+			}
+		} else {
+			fmt.Println("Returning extensions: ", len(eps[0].Extensions))
+			return eps[0].Extensions
+		}
+	}
+
+	return nil
 }
 
 // Load
@@ -260,24 +283,6 @@ func (e *Engine) Load(path string) error {
 				}
 
 				e.addPlugin(ip)
-
-				if nil != p.Listeners && len(p.Listeners) > 0 {
-					fmt.Println("There is a listener to add")
-					for _, l := range p.Listeners {
-						ll := Listener{
-							Listener: l,
-							Plugin:   *ip,
-						}
-
-						listeners := e.listeners[l.Event]
-						if nil == listeners {
-							listeners = make([]Listener, 0)
-						}
-
-						listeners = append(listeners, ll)
-						e.listeners[l.Event] = listeners
-					}
-				}
 			}
 		}
 	}
@@ -294,12 +299,21 @@ func (e *Engine) Load(path string) error {
 func (e *Engine) resolve() {
 	if nil != e.unresolved && len(e.unresolved) > 0 {
 		for _, v := range e.unresolved {
-			for _, ex := range v {
-				for _, ep := range e.extensionPoints {
-					if ep.Id == ex.ExtensionPoint {
-						// add the extension to the EPs extensions list and set to resolved
-						ep.Extensions = append(ep.Extensions, ex)
+			// mkae sure the status is unresolved
+			if !v.Resolved {
+				// find extension point this extension anchors to
+				eps := e.extensionPoints[v.ExtensionPoint]
+				if nil != eps && len(eps) > 0 {
+					for _, ep := range eps {
+						fmt.Println("Checking if ep resolves: ", v.ExtensionPoint, ep.Id)
+						if v.ExtensionPoint == ep.Id {
+							fmt.Println("We found a match: ", ep.Name)
+							ep.Extensions = append(ep.Extensions, v)
+							v.Resolved = true
+						}
 					}
+				} else {
+					fmt.Println("Looks like extension point not yet loaded: ", v.ExtensionPoint)
 				}
 			}
 		}
@@ -312,38 +326,24 @@ func (e *Engine) resolve() {
 // useful if the host/client app has some specific things it wants to allow anchor points for plugins to attach to.
 // Ideally a host/client app may ship/install/start with plugins already, but this gives the ability for the host/client
 // to have native code functions tied to extension points that are then filled by plugin extensions.
-func (e *Engine) RegisterHostExtensionPoint(id, name, description string, f func([]*Extension) error) {
+func (e *Engine) RegisterHostExtensionPoint(id, name, version, description string) {
 	ep := &ExtensionPoint{
 		ExtensionPoint: types.ExtensionPoint{
 			Id:          id,
 			Description: description,
 			Name:        name,
+			Version:     version,
 		},
-		Func: f,
 	}
 
-	e.extensionPoints = append(e.extensionPoints, ep)
-}
-
-func (e *Engine) FireEvent(event string, data []byte) {
-	listeners := e.listeners[event]
-	if nil != listeners && len(listeners) > 0 {
-		for _, ll := range listeners {
-			fmt.Println("About to fire event to plugin: ", ll.Plugin.Details.Name)
-			status, data, err := ll.Plugin.Plugin.Call(ll.FuncName, data)
-			if nil != err {
-				fmt.Println("Error calling listener func in plugin: ", err)
-			} else {
-				if status == 0 {
-					if nil != data && len(data) > 0 {
-						fmt.Println("We got some data back from event handler: ", data)
-					}
-				} else {
-					fmt.Println("Return from event handler reports an error")
-				}
-			}
-		}
+	exps := e.extensionPoints[id]
+	if nil == exps {
+		exps = make([]*ExtensionPoint, 0)
 	}
+
+	exps = append(exps, ep)
+	// reassign because exps may be a new larger ref.. has to be reassigned
+	e.extensionPoints[id] = exps
 }
 
 func (e *Engine) GetPlugins() map[string]map[string]*Plugin {
@@ -351,6 +351,7 @@ func (e *Engine) GetPlugins() map[string]map[string]*Plugin {
 }
 
 func (e *Engine) CallExtensionFunc(ex Extension, data []byte) error {
+	fmt.Println("Calling extension: ", ex.Name)
 	return nil
 }
 
@@ -361,16 +362,14 @@ func (e *Engine) CallExtensionFunc(ex Extension, data []byte) error {
 // able to utilize along with the plugin engine host functions.
 func NewPluginEngine(hostFuncs []extism.HostFunction) *Engine {
 	plugins := make(map[string]map[string]*Plugin)
-	unresolved := make(map[string][]*Extension)
-	listeners := make(map[string][]Listener)
-	extensionPoints := make([]*ExtensionPoint, 0)
+	unresolved := make([]*Extension, 0)
+	extensionPoints := make(map[string][]*ExtensionPoint)
 
 	// instantiate as we need this in the host functions
 	engine := &Engine{
 		plugins:         plugins,
 		unresolved:      unresolved,
 		hostFuncs:       hostFuncs,
-		listeners:       listeners,
 		extensionPoints: extensionPoints,
 	}
 
