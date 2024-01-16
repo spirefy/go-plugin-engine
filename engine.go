@@ -6,6 +6,7 @@ import (
 	"fmt"
 	extism "github.com/extism/go-sdk"
 	"github.com/spirefy/go-pdk/types"
+	gopdk "github.com/spirefy/go-pdk/types"
 	"github.com/tetratelabs/wazero"
 	"net/url"
 	"os"
@@ -13,34 +14,37 @@ import (
 	"strings"
 )
 
-type ExtensionPoint struct {
-	types.ExtensionPoint
-	// Because this outer ExtensionPoint wrapper allows for host extension points, which are native to Go, a func pointer
-	// to call upon that extension point is necessary. This is not the typical wasm string func name to call, but an
-	// actual Go function provided by the host to be called
-	Func       func([]*Extension) error
-	Extensions []*Extension
-	Plugin     Plugin
-}
+type (
+	ExtensionPoint struct {
+		types.ExtensionPoint
+		// Because this outer ExtensionPoint wrapper allows for host extension points, which are native to Go, a func pointer
+		// to call upon that extension point is necessary. This is not the typical wasm string func name to call, but an
+		// actual Go function provided by the host to be called
+		Func       func([]*Extension) error
+		Extensions []*Extension
+		Plugin     Plugin
+	}
 
-type Extension struct {
-	types.Extension
-	Plugin   Plugin
-	Resolved bool `json:"resolved" yaml:"resolved"`
-}
+	Extension struct {
+		types.Extension
+		Plugin   Plugin
+		Resolved bool `json:"resolved" yaml:"resolved"`
+	}
 
-type Plugin struct {
-	Details  types.Plugin
-	Plugin   *extism.Plugin
-	Resolved bool
-}
+	Plugin struct {
+		Details  types.Plugin
+		Plugin   *extism.Plugin
+		Resolved bool
+	}
 
-type Engine struct {
-	plugins         map[string]map[string]*Plugin
-	extensionPoints map[string][]*ExtensionPoint
-	unresolved      []*Extension
-	hostFuncs       []extism.HostFunction
-}
+	Engine struct {
+		plugins         map[string]map[string]*Plugin
+		extensionPoints map[string][]*ExtensionPoint
+		extensions      map[string]*Extension
+		unresolved      []*Extension
+		hostFuncs       []extism.HostFunction
+	}
+)
 
 func contains(arr []string, str string) bool {
 	for _, s := range arr {
@@ -137,19 +141,25 @@ func (e *Engine) addPlugin(p *Plugin) {
 // This method will look for a matching endpoint in the map of endpoints and if found and the version provided is not
 // nil, look for a matching version (TODO: version range may be added in future). If version is nil, the first
 // extension point's extensions are returned.
-func (e *Engine) GetExtensionsForExtensionPoint(epoint string, version *string) []*Extension {
-	fmt.Println("looking for extension point ", epoint)
+func (e *Engine) GetExtensionsForExtensionPoint(epoint string, version *string) []*gopdk.Extension {
 	eps := e.extensionPoints[epoint]
 	if nil != eps && len(eps) > 0 {
 		if nil != version && len(*version) > 0 {
 			for _, epVer := range eps {
 				if epVer.Version == *version {
-					return epVer.Extensions
+					exts := make([]*gopdk.Extension, 0)
+					for _, epex := range epVer.Extensions {
+						exts = append(exts, &epex.Extension)
+					}
+					return exts
 				}
 			}
 		} else {
-			fmt.Println("Returning extensions: ", len(eps[0].Extensions))
-			return eps[0].Extensions
+			exts := make([]*gopdk.Extension, 0)
+			for _, epex := range eps[0].Extensions {
+				exts = append(exts, &epex.Extension)
+			}
+			return exts
 		}
 	}
 
@@ -310,6 +320,7 @@ func (e *Engine) resolve() {
 							fmt.Println("We found a match: ", ep.Name)
 							ep.Extensions = append(ep.Extensions, v)
 							v.Resolved = true
+							e.extensions[v.Name] = v
 						}
 					}
 				} else {
@@ -350,9 +361,24 @@ func (e *Engine) GetPlugins() map[string]map[string]*Plugin {
 	return e.plugins
 }
 
-func (e *Engine) CallExtensionFunc(ex Extension, data []byte) error {
-	fmt.Println("Calling extension: ", ex.Name)
-	return nil
+func (e *Engine) CallExtensionFunc(ex gopdk.Extension, data []byte) ([]byte, error) {
+	for _, ext := range e.extensions {
+		if ext.Name == ex.Name {
+			fmt.Println("We got the FULL extension with plugin")
+			p := ext.Plugin
+			fmt.Println("About to call func: ", ext.Func)
+			s, data, err := p.Plugin.Call(ext.Func, data)
+			if nil != err {
+				fmt.Println("Error calling extension func: ", ex.Name, err)
+				return nil, err
+			}
+
+			fmt.Println("Status: ", s)
+			return data, nil
+		}
+	}
+
+	return nil, nil
 }
 
 // NewPluginEngine
@@ -364,12 +390,14 @@ func NewPluginEngine(hostFuncs []extism.HostFunction) *Engine {
 	plugins := make(map[string]map[string]*Plugin)
 	unresolved := make([]*Extension, 0)
 	extensionPoints := make(map[string][]*ExtensionPoint)
+	extensions := make(map[string]*Extension)
 
 	// instantiate as we need this in the host functions
 	engine := &Engine{
 		plugins:         plugins,
 		unresolved:      unresolved,
 		hostFuncs:       hostFuncs,
+		extensions:      extensions,
 		extensionPoints: extensionPoints,
 	}
 
