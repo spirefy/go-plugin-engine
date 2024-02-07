@@ -88,7 +88,9 @@ func findFilesWithExtensions(root string, extensions []string) ([]string, error)
 // It's important to note that if a plugin already exists at the name and version intersection, it is replaced. This
 // should allow for reloading (and eventual GC of old plugins as they are replaced) if need be.
 func (e *Engine) addPlugin(p *Plugin) {
+	fmt.Print("ADDING PLUGIN")
 	if nil != e.plugins && nil != p {
+		fmt.Println(": ", p.Details.Name)
 		pv := e.plugins[p.Details.Name]
 
 		if nil == pv {
@@ -168,6 +170,7 @@ func (e *Engine) GetExtensionsForExtensionPoint(epoint string, version *string) 
 
 // Load
 func (e *Engine) Load(path string) error {
+	fmt.Println("LOADING...")
 	// First make sure that path is NOT a URL to a single plugin file
 	lower := strings.ToLower(path)
 	if strings.HasPrefix(lower, "http") {
@@ -264,6 +267,7 @@ func (e *Engine) Load(path string) error {
 		// add host functions
 		hostFuncs := []extism.HostFunction{sendEvent, callExtension}
 
+		fmt.Println("Here we go")
 		plug, err := extism.NewPlugin(ctx, manifest, config, hostFuncs)
 
 		if err != nil {
@@ -276,9 +280,12 @@ func (e *Engine) Load(path string) error {
 		if nil != err {
 			fmt.Println("Error calling plugin: ", err)
 			continue
+		} else {
+			fmt.Println("WE CALLED IT")
 		}
 
 		if nil != data && len(data) > 0 {
+			fmt.Println(string(data))
 			p := &types.Plugin{}
 			er := json.Unmarshal(data, p)
 

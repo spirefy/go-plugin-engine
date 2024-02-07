@@ -2,10 +2,14 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/extism/go-sdk v1.0.0 h1://UAyiQGok1ihrlzpkfF6UTY5TwJs6hKJBXnQ0sui20=
 github.com/extism/go-sdk v1.0.0/go.mod h1:xUfKSEQndAvHBc1Ohdre0e+UdnRzUpVfbA8QLcx4fbY=
+github.com/extism/go-sdk v1.0.3 h1:iiCJySdn6WwccRDir8zlOCqws/aibVfSEXolo+KRpug=
+github.com/extism/go-sdk v1.0.3/go.mod h1:xUfKSEQndAvHBc1Ohdre0e+UdnRzUpVfbA8QLcx4fbY=
 github.com/gobwas/glob v0.2.3 h1:A4xDbljILXROh+kObIiy5kIaPYD8e96x1tgBhUI5J+Y=
 github.com/gobwas/glob v0.2.3/go.mod h1:d3Ez4x06l9bZtSvzIay5+Yzi0fmZzPgnTbPcKjJAkT8=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+github.com/spirefy/go-pdk v0.0.0-20240114084057-369884d1b96c h1:gAyPL8w0kjVwDX5JXL97VYjyeSsmRebl7o3ssdaQN0g=
+github.com/spirefy/go-pdk v0.0.0-20240114084057-369884d1b96c/go.mod h1:K42Q1gNOK+cil7kmlsA7QaS6yhU9BN3veCf/csXhPJM=
 github.com/stretchr/testify v1.8.4 h1:CcVxjf3Q8PM0mHUKJCdn+eZZtm5yQwehR5yeSVQQcUk=
 github.com/stretchr/testify v1.8.4/go.mod h1:sz/lmYIOXD/1dqDmKjjqLyZ2RngseejIcXlSw2iwfAo=
 github.com/tetratelabs/wazero v1.6.0 h1:z0H1iikCdP8t+q341xqepY4EWvHEw8Es7tlqiVzlP3g=
