@@ -211,6 +211,17 @@ func (e *Engine) Load(path string) error {
 		LogLevel:      extism.LogLevelDebug,
 	}
 
+	// this is defined here because when a plugin module is loaded the extism.Plugin instance is assigned during the
+	// host func registerPlugin call.. but as that is a call back, the definition has no instance of the actual
+	// extism.Plugin to use. The extism.CurrentPlugin that IS available in the host/callback func has a private
+	// extism.Plugin property that can not be accessed in the callback registerPlugin func. So we need to keep the
+	// instance of it in this variable, defined outside of the host func declarations because the registerPlugin call
+	// SHOULD happen inside the plugin's start() exported function. If it does not happen there, the plugin wont
+	// ever be added/registered. So it is 100% required for the plugin's exported start() func to call the host
+	// function regstierPlugin() function. The Go PDK (and other language PDKs) should provide an idiomatic wrapper
+	// around the extism/wasm requirements for the registerPlugin func.
+	var callingPlugin *extism.Plugin
+
 	sendEvent := extism.NewHostFunctionWithStack(
 		"sendEvent",
 		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
@@ -245,10 +256,6 @@ func (e *Engine) Load(path string) error {
 				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST callExtension FUNCTION: ", err2)
 			}
 
-			if nil != err {
-				fmt.Println("ERROR SENDING EVENT: ", data, err)
-			}
-
 			fmt.Println("Data: ", data)
 		},
 		[]extism.ValueType{extism.ValueTypeI64}, []extism.ValueType{extism.ValueTypeI64},
@@ -264,14 +271,18 @@ func (e *Engine) Load(path string) error {
 				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST registerPlugin FUNCTION: ", err)
 			}
 
-			plugin := types.Plugin{}
-			err = json.Unmarshal(data, &plugin)
+			plugin := &types.Plugin{}
+			err = json.Unmarshal(data, plugin)
 			if nil != err {
 				fmt.Println("A PLUGIN IS BEING REGISTERED VIA CALLBACK HOST FUNC: ", plugin.Id, plugin.Name)
-			}
-			fmt.Println("Plugin: ", plugin.Id, plugin.Name, plugin.Version, plugin.MinVersion, plugin.Description)
-			for _, ep := range plugin.ExtensionPoints {
-				fmt.Println("EP: ", ep.Id, ep.Name)
+			} else {
+				newPlugin := &Plugin{
+					Details:  *plugin,
+					Plugin:   callingPlugin,
+					Resolved: false,
+				}
+
+				e.addPlugin(newPlugin)
 			}
 		},
 
@@ -291,14 +302,14 @@ func (e *Engine) Load(path string) error {
 			},
 		}
 
-		plug, err := extism.NewPlugin(ctx, manifest, config, hostFuncs)
+		callingPlugin, err = extism.NewPlugin(ctx, manifest, config, hostFuncs)
 
 		if err != nil {
 			fmt.Printf("Failed to initialize plugin: %v\n", err)
 			continue
 		}
 
-		_, _, err = plug.Call("start", nil)
+		_, _, err = callingPlugin.Call("start", nil)
 
 		if nil != err {
 			fmt.Println("Error calling plugin: ", err)
@@ -406,8 +417,12 @@ func (e *Engine) CallExtensionFunc(ex gopdk.Extension, data []byte) ([]byte, err
 	for _, ext := range e.extensions {
 		if ext.Name == ex.Name {
 			fmt.Println("We got the FULL extension with plugin")
+			fmt.Println("PLUGIN TO CALL: ", ext.Plugin.Details.Name)
 			p := ext.Plugin
 			fmt.Println("About to call func: ", ext.Func)
+			if nil == p.Plugin {
+				fmt.Println("UH OH the plugin instance is nil")
+			}
 			s, data, err := p.Plugin.Call(ext.Func, data)
 			if nil != err {
 				fmt.Println("Error calling extension func: ", ex.Name, err)
