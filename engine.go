@@ -211,6 +211,77 @@ func (e *Engine) Load(path string) error {
 		LogLevel:      extism.LogLevelDebug,
 	}
 
+	sendEvent := extism.NewHostFunctionWithStack(
+		"sendEvent",
+		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
+			event, err := p.ReadString(stack[0])
+			if nil != err {
+				// TODO: Figure out how to handle this correctly
+				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST sendEvent FUNCTION: ", err)
+			}
+
+			data, err2 := p.ReadBytes(stack[1])
+			if nil != err2 {
+				// TODO: Figure out how to handle this correctly
+				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST sendEvent FUNCTION: ", err2)
+			}
+
+			if nil != err {
+				fmt.Println("ERROR SENDING EVENT: ", event, err)
+			}
+
+			fmt.Println("Data: ", data)
+		},
+		[]extism.ValueType{extism.ValueTypeI64, extism.ValueTypeI64}, []extism.ValueType{extism.ValueTypeI64},
+	)
+	sendEvent.SetNamespace("extism:host/user")
+
+	callExtension := extism.NewHostFunctionWithStack(
+		"callExtension",
+		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
+			data, err2 := p.ReadBytes(stack[0])
+			if nil != err2 {
+				// TODO: Figure out how to handle this correctly
+				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST callExtension FUNCTION: ", err2)
+			}
+
+			if nil != err {
+				fmt.Println("ERROR SENDING EVENT: ", data, err)
+			}
+
+			fmt.Println("Data: ", data)
+		},
+		[]extism.ValueType{extism.ValueTypeI64}, []extism.ValueType{extism.ValueTypeI64},
+	)
+	callExtension.SetNamespace("extism:host/user")
+
+	registerPlugin := extism.NewHostFunctionWithStack("registerPlugin",
+		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
+			fmt.Println("REGISTER HOST FUNC CALLED")
+			data, err := p.ReadBytes(stack[0])
+			if nil != err {
+				// TODO: Figure out how to handle this correctly
+				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST registerPlugin FUNCTION: ", err)
+			}
+
+			plugin := types.Plugin{}
+			err = json.Unmarshal(data, &plugin)
+			if nil != err {
+				fmt.Println("A PLUGIN IS BEING REGISTERED VIA CALLBACK HOST FUNC: ", plugin.Id, plugin.Name)
+			}
+			fmt.Println("Plugin: ", plugin.Id, plugin.Name, plugin.Version, plugin.MinVersion, plugin.Description)
+			for _, ep := range plugin.ExtensionPoints {
+				fmt.Println("EP: ", ep.Id, ep.Name)
+			}
+		},
+
+		[]extism.ValueType{extism.ValueTypeI64}, []extism.ValueType{extism.ValueTypeI64},
+	)
+	registerPlugin.SetNamespace("extism:host/user")
+
+	// add host functions
+	hostFuncs := []extism.HostFunction{sendEvent, callExtension, registerPlugin}
+
 	for _, file := range files {
 		manifest := extism.Manifest{
 			Wasm: []extism.Wasm{
@@ -220,54 +291,6 @@ func (e *Engine) Load(path string) error {
 			},
 		}
 
-		sendEvent := extism.NewHostFunctionWithStack(
-			"sendEvent",
-			func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
-				event, err := p.ReadString(stack[0])
-				if nil != err {
-					// TODO: Figure out how to handle this correctly
-					fmt.Println("ERROR CALLING FROM PLUGIN TO HOST sendEvent FUNCTION: ", err)
-				}
-
-				data, err2 := p.ReadBytes(stack[1])
-				if nil != err2 {
-					// TODO: Figure out how to handle this correctly
-					fmt.Println("ERROR CALLING FROM PLUGIN TO HOST sendEvent FUNCTION: ", err2)
-				}
-
-				if nil != err {
-					fmt.Println("ERROR SENDING EVENT: ", event, err)
-				}
-
-				fmt.Println("Data: ", data)
-			},
-			[]extism.ValueType{extism.ValueTypeI64, extism.ValueTypeI64}, []extism.ValueType{extism.ValueTypeI64},
-		)
-		sendEvent.SetNamespace("extism:host/user")
-
-		callExtension := extism.NewHostFunctionWithStack(
-			"callExtension",
-			func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
-				data, err2 := p.ReadBytes(stack[0])
-				if nil != err2 {
-					// TODO: Figure out how to handle this correctly
-					fmt.Println("ERROR CALLING FROM PLUGIN TO HOST callExtension FUNCTION: ", err2)
-				}
-
-				if nil != err {
-					fmt.Println("ERROR SENDING EVENT: ", data, err)
-				}
-
-				fmt.Println("Data: ", data)
-			},
-			[]extism.ValueType{extism.ValueTypeI64}, []extism.ValueType{extism.ValueTypeI64},
-		)
-		callExtension.SetNamespace("extism:host/user")
-
-		// add host functions
-		hostFuncs := []extism.HostFunction{sendEvent, callExtension}
-
-		fmt.Println("Here we go")
 		plug, err := extism.NewPlugin(ctx, manifest, config, hostFuncs)
 
 		if err != nil {
@@ -275,7 +298,7 @@ func (e *Engine) Load(path string) error {
 			continue
 		}
 
-		_, data, err := plug.Call("register", nil)
+		_, _, err = plug.Call("start", nil)
 
 		if nil != err {
 			fmt.Println("Error calling plugin: ", err)
@@ -283,30 +306,34 @@ func (e *Engine) Load(path string) error {
 		} else {
 			fmt.Println("WE CALLED IT")
 		}
-
-		if nil != data && len(data) > 0 {
-			fmt.Println(string(data))
-			p := &types.Plugin{}
-			er := json.Unmarshal(data, p)
-
-			if nil != er {
-				fmt.Println("Error unmarshalling plugin data: ", er)
-				continue
-			} else {
-				ip := &Plugin{
-					Details:  *p,
-					Plugin:   plug,
-					Resolved: false,
-				}
-
-				e.addPlugin(ip)
-			}
-		}
 	}
 
 	e.resolve()
 	return nil
 }
+
+/**
+
+THIS CODE IS TO BE PUT IN REGISTER PLUGIN TO ADD PLUGIN TO UNRESOLVED
+if nil != data && len(data) > 0 {
+	fmt.Println(string(data))
+	p := &types.Plugin{}
+	er := json.Unmarshal(data, p)
+
+	if nil != er {
+		fmt.Println("Error unmarshalling plugin data: ", er)
+		continue
+	} else {
+		ip := &Plugin{
+			Details:  *p,
+			Plugin:   plug,
+			Resolved: false,
+		}
+
+		e.addPlugin(ip)
+	}
+}
+*/
 
 // resolve
 //
@@ -315,6 +342,7 @@ func (e *Engine) Load(path string) error {
 // are resolved will a plugin's status change to resolved.
 func (e *Engine) resolve() {
 	if nil != e.unresolved && len(e.unresolved) > 0 {
+		leftover := make([]*Extension, 0)
 		for _, v := range e.unresolved {
 			// mkae sure the status is unresolved
 			if !v.Resolved {
@@ -328,6 +356,9 @@ func (e *Engine) resolve() {
 							ep.Extensions = append(ep.Extensions, v)
 							v.Resolved = true
 							e.extensions[v.Name] = v
+						} else {
+							// not found, append to leftover
+							leftover = append(leftover, v)
 						}
 					}
 				} else {
@@ -335,6 +366,9 @@ func (e *Engine) resolve() {
 				}
 			}
 		}
+
+		// set the leftover unresolved
+		e.unresolved = leftover
 	}
 }
 

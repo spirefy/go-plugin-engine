@@ -39,3 +39,17 @@ EventListener and Event:
   the event structure into a []byte to send it. It is up to each listener to reverse that process.. unmarshal the json back into the appropriate structure to utilize the data within.
   Plugins can call the provided host function SendEvent using the PluginEngine PDK for their specific language. The PDK wraps several host functions to abstract away the Extism PDK particulars
   for setting up parameters correctly to be passed to the host function and any return value. 
+
+DEPENDENCY:
+ There are two forms of dependencies. One is where a plugin can NOT function without the other plugin being resolved/available. The other
+is more of "discovery" in that a plugin can look up a given other plugin's extension point(s) and if they are available, can make use of
+them (to call extensions of those extension points).
+
+NOTES:
+When a plugin extension code executes.. it can look up (discover) extension points of other plugins. If the extension 
+DEPENDS on a given other plugins extension point, it adds that extnesion point to its Plugin dependency list. This is to ensure
+that THIS plugin can NOT be called/work/resolved UNLESS a dependent plugin AND extension point is resolved/available. In the case of
+dynamic discovery, however, there is no dependency needed. It is up to the plugin extension code to NOT FAIL IF a plugin
+extension point does not exist (e.g. not resolved for any reason). 
+Plugin extension code uses the plugin engine framework to call upon another extension point function or extension. This 
+is to ensure all calls go thru the engine.
