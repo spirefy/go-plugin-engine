@@ -3,6 +3,7 @@ package pluginengine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	extism "github.com/extism/go-sdk"
 	"github.com/spirefy/go-pdk/types"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 type (
@@ -88,9 +90,7 @@ func findFilesWithExtensions(root string, extensions []string) ([]string, error)
 // It's important to note that if a plugin already exists at the name and version intersection, it is replaced. This
 // should allow for reloading (and eventual GC of old plugins as they are replaced) if need be.
 func (e *Engine) addPlugin(p *Plugin) {
-	fmt.Print("ADDING PLUGIN")
 	if nil != e.plugins && nil != p {
-		fmt.Println(": ", p.Details.Name)
 		pv := e.plugins[p.Details.Name]
 
 		if nil == pv {
@@ -138,22 +138,79 @@ func (e *Engine) addPlugin(p *Plugin) {
 	}
 }
 
+// validateVersion
+//
+// TODO: For now this just returns true. It needs to add a check to make sure a version string matches a semver version
+// value
+func isSemverValid(version string) bool {
+	// Split the version string into major, minor, and patch components
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return false
+	}
+
+	// Check if each component is a non-negative integer
+	for _, part := range parts {
+		if !isValidNumber(part) {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidNumber
+// helper func used by isSemverValid
+func isValidNumber(str string) bool {
+	if len(str) == 0 || str[0] == '-' {
+		return false
+	}
+
+	for _, c := range str {
+		if !unicode.IsDigit(c) {
+			return false
+		}
+	}
+	return true
+}
+
 // GetExtensionsForExtensionPoint
 //
 // This method will look for a matching endpoint in the map of endpoints and if found and the version provided is not
 // nil, look for a matching version (TODO: version range may be added in future). If version is nil, the first
 // extension point's extensions are returned.
-func (e *Engine) GetExtensionsForExtensionPoint(epoint string, version *string) []*gopdk.Extension {
+func (e *Engine) GetExtensionsForExtensionPoint(epoint string, versions []string) ([]*gopdk.Extension, error) {
 	eps := e.extensionPoints[epoint]
+	var lowerVersion, upperVersion string
+
+	if len(versions) > 0 {
+		lowerVersion = versions[0]
+		if len(versions) > 1 {
+			upperVersion = versions[1]
+		}
+
+		if !isSemverValid(lowerVersion) {
+			return nil, errors.New("version or lower bound version is not a valid SemVer: " + lowerVersion)
+		}
+
+		if len(upperVersion) > 0 && !isSemverValid(upperVersion) {
+			return nil, errors.New("version or upper bound version is not a valid SemVer: " + upperVersion)
+		}
+	}
+
 	if nil != eps && len(eps) > 0 {
-		if nil != version && len(*version) > 0 {
+		if len(lowerVersion) > 0 {
 			for _, epVer := range eps {
-				if epVer.Version == *version {
-					exts := make([]*gopdk.Extension, 0)
-					for _, epex := range epVer.Extensions {
-						exts = append(exts, &epex.Extension)
+				// if only one version we need an exact match
+				if len(upperVersion) <= 0 {
+					if epVer.Version == lowerVersion {
+						exts := make([]*gopdk.Extension, 0)
+						for _, epex := range epVer.Extensions {
+							exts = append(exts, &epex.Extension)
+						}
+						return exts, nil
 					}
-					return exts
+				} else {
+					// we have a range of versions so the epVer.Version needs to be >= lowerVersion and <= upperVersion
 				}
 			}
 		} else {
@@ -161,16 +218,15 @@ func (e *Engine) GetExtensionsForExtensionPoint(epoint string, version *string) 
 			for _, epex := range eps[0].Extensions {
 				exts = append(exts, &epex.Extension)
 			}
-			return exts
+			return exts, nil
 		}
 	}
 
-	return nil
+	return nil, errors.New("no extensions found for extension point")
 }
 
 // Load
 func (e *Engine) Load(path string) error {
-	fmt.Println("LOADING...")
 	// First make sure that path is NOT a URL to a single plugin file
 	lower := strings.ToLower(path)
 	if strings.HasPrefix(lower, "http") {
@@ -220,43 +276,51 @@ func (e *Engine) Load(path string) error {
 	// ever be added/registered. So it is 100% required for the plugin's exported start() func to call the host
 	// function regstierPlugin() function. The Go PDK (and other language PDKs) should provide an idiomatic wrapper
 	// around the extism/wasm requirements for the registerPlugin func.
+	//
+	// NOTE: This is done in synchronous.. not async so should not have any concerns with this "global" variable being
+	// used by more than one thread and assigning the incorrect calling plugin instance.
 	var callingPlugin *extism.Plugin
 
-	sendEvent := extism.NewHostFunctionWithStack(
-		"sendEvent",
+	getExtensionsForExtensionPoint := extism.NewHostFunctionWithStack(
+		"getExtensionsForExtensionPoint",
 		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
-			event, err := p.ReadString(stack[0])
-			if nil != err {
-				// TODO: Figure out how to handle this correctly
-				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST sendEvent FUNCTION: ", err)
-			}
+			ep, err2 := p.ReadString(stack[0])
 
-			data, err2 := p.ReadBytes(stack[1])
+			fmt.Println("WE ARE CALLING GET EXTENSION FOR EXTENSION POINT.. EP IS ", ep)
 			if nil != err2 {
 				// TODO: Figure out how to handle this correctly
-				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST sendEvent FUNCTION: ", err2)
+				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST getExtensionsForExtensionPoint FUNCTION: ", err2)
 			}
 
+			ver, err2 := p.ReadString(stack[1])
+			if nil != err2 {
+				// TODO: Figure out how to handle this correctly
+				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST getExtensionsForExtensionPoint FUNCTION: ", err2)
+			}
+
+			fmt.Println("VERSION FOR EP IS ", ver)
+			exts, err := e.GetExtensionsForExtensionPoint(ep, nil)
 			if nil != err {
-				fmt.Println("ERROR SENDING EVENT: ", event, err)
+				fmt.Println("ERROR IN HOST FUNC: ", err)
 			}
-
-			fmt.Println("Data: ", data)
+			if nil != exts && len(exts) > 0 {
+				for _, ext := range exts {
+					fmt.Println("We're seeing if ext makes sense: ", ext.Id, ext.Name, ext.Func)
+				}
+			}
 		},
 		[]extism.ValueType{extism.ValueTypeI64, extism.ValueTypeI64}, []extism.ValueType{extism.ValueTypeI64},
 	)
-	sendEvent.SetNamespace("extism:host/user")
+	getExtensionsForExtensionPoint.SetNamespace("extism:host/user")
 
 	callExtension := extism.NewHostFunctionWithStack(
 		"callExtension",
 		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
-			data, err2 := p.ReadBytes(stack[0])
+			_, err2 := p.ReadBytes(stack[0])
 			if nil != err2 {
 				// TODO: Figure out how to handle this correctly
 				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST callExtension FUNCTION: ", err2)
 			}
-
-			fmt.Println("Data: ", data)
 		},
 		[]extism.ValueType{extism.ValueTypeI64}, []extism.ValueType{extism.ValueTypeI64},
 	)
@@ -264,7 +328,6 @@ func (e *Engine) Load(path string) error {
 
 	registerPlugin := extism.NewHostFunctionWithStack("registerPlugin",
 		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
-			fmt.Println("REGISTER HOST FUNC CALLED")
 			data, err := p.ReadBytes(stack[0])
 			if nil != err {
 				// TODO: Figure out how to handle this correctly
@@ -291,9 +354,10 @@ func (e *Engine) Load(path string) error {
 	registerPlugin.SetNamespace("extism:host/user")
 
 	// add host functions
-	hostFuncs := []extism.HostFunction{sendEvent, callExtension, registerPlugin}
+	hostFuncs := []extism.HostFunction{getExtensionsForExtensionPoint, callExtension, registerPlugin}
 
 	for _, file := range files {
+		fmt.Println(file)
 		manifest := extism.Manifest{
 			Wasm: []extism.Wasm{
 				extism.WasmFile{
@@ -322,29 +386,6 @@ func (e *Engine) Load(path string) error {
 	e.resolve()
 	return nil
 }
-
-/**
-
-THIS CODE IS TO BE PUT IN REGISTER PLUGIN TO ADD PLUGIN TO UNRESOLVED
-if nil != data && len(data) > 0 {
-	fmt.Println(string(data))
-	p := &types.Plugin{}
-	er := json.Unmarshal(data, p)
-
-	if nil != er {
-		fmt.Println("Error unmarshalling plugin data: ", er)
-		continue
-	} else {
-		ip := &Plugin{
-			Details:  *p,
-			Plugin:   plug,
-			Resolved: false,
-		}
-
-		e.addPlugin(ip)
-	}
-}
-*/
 
 // resolve
 //
@@ -416,20 +457,19 @@ func (e *Engine) GetPlugins() map[string]map[string]*Plugin {
 func (e *Engine) CallExtensionFunc(ex gopdk.Extension, data []byte) ([]byte, error) {
 	for _, ext := range e.extensions {
 		if ext.Name == ex.Name {
-			fmt.Println("We got the FULL extension with plugin")
-			fmt.Println("PLUGIN TO CALL: ", ext.Plugin.Details.Name)
+
 			p := ext.Plugin
-			fmt.Println("About to call func: ", ext.Func)
+
 			if nil == p.Plugin {
 				fmt.Println("UH OH the plugin instance is nil")
 			}
-			s, data, err := p.Plugin.Call(ext.Func, data)
+
+			_, data, err := p.Plugin.Call(ext.Func, data)
 			if nil != err {
 				fmt.Println("Error calling extension func: ", ex.Name, err)
 				return nil, err
 			}
 
-			fmt.Println("Status: ", s)
 			return data, nil
 		}
 	}
