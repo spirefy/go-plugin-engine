@@ -6,9 +6,10 @@ import (
 	"errors"
 	"fmt"
 	extism "github.com/extism/go-sdk"
-	"github.com/spirefy/go-pdk/types"
-	gopdk "github.com/spirefy/go-pdk/types"
+	gopdk "github.com/spirefy/go-pdk"
 	"github.com/tetratelabs/wazero"
+	"gopkg.in/yaml.v3"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -17,58 +18,57 @@ import (
 )
 
 type (
-	ExtensionPoint struct {
-		types.ExtensionPoint
+	extensionPoint struct {
+		gopdk.ExtensionPoint `json:"extensionPoint" yaml:"extensionPoint"`
 		// Because this outer ExtensionPoint wrapper allows for host extension points, which are native to Go, a func pointer
 		// to call upon that extension point is necessary. This is not the typical wasm string func name to call, but an
 		// actual Go function provided by the host to be called
-		Func       func([]*Extension) error
-		Extensions []*Extension
-		Plugin     Plugin
+		Func       func([]*extension) error
+		Extensions []*extension `json:"extensions" yaml:"extensions"`
+		Plugin     plugin       `json:"plugin" yaml:"plugin"`
 	}
 
-	Extension struct {
-		types.Extension
-		Plugin   Plugin
-		Resolved bool `json:"resolved" yaml:"resolved"`
+	extension struct {
+		gopdk.Extension `json:"extension" yaml:"extension"`
+		Plugin          plugin `json:"plugin" yaml:"plugin"`
+		Resolved        bool   `json:"resolved" yaml:"resolved"`
 	}
 
-	Plugin struct {
-		Details  types.Plugin
-		Plugin   *extism.Plugin
-		Resolved bool
+	plugin struct {
+		Plugin       *extism.Plugin `json:"plugin" yaml:"plugin"`
+		PathToModule string         `json:"pathToModule" yaml:"pathToModule"`
+		Resolved     bool           `json:"resolved" yaml:"resolved"`
+		LoadOnStart  bool           `json:"loadOnStart" yaml:"loadOnStart"`
 	}
 
 	Engine struct {
-		plugins         map[string]map[string]*Plugin
-		extensionPoints map[string][]*ExtensionPoint
-		extensions      map[string]*Extension
-		unresolved      []*Extension
+		context         context.Context
+		logLevel        extism.LogLevel
+		plugins         map[string]map[string]*plugin
+		extensionPoints map[string][]*extensionPoint
+		extensions      map[string]*extension
+		unresolved      []*extension
 		hostFuncs       []extism.HostFunction
+		pluginPath      string // path where .tar.gz and .zip plugins will be extracted to (overwrite every time)
 	}
 )
 
-func contains(arr []string, str string) bool {
-	for _, s := range arr {
-		if s == str {
-			return true
-		}
-	}
-	return false
-}
+// This variable will hold pointers to plugins keyed on an extension ID. This can be used
+// by CallExtension to quickly access the extension ID to make a call to and check if its instantiated
+// or not and resolved.
+var callableExtensions = make(map[string]*plugin)
 
 func findFilesWithExtensions(root string, extensions []string) ([]string, error) {
 	var matchingFiles []string
 
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if !info.IsDir() {
-			ext := filepath.Ext(path)
-			if contains(extensions, ext) {
-				// fileName := filepath.Base(path)
+		for _, ext := range extensions {
+			if !entry.IsDir() && strings.HasSuffix(path, ext) {
+				// You can also read the file contents here if needed
 				matchingFiles = append(matchingFiles, path)
 			}
 		}
@@ -89,36 +89,44 @@ func findFilesWithExtensions(root string, extensions []string) ([]string, error)
 // at the name and version provided does not yet exist, the map of internalPlugin objects is created.
 // It's important to note that if a plugin already exists at the name and version intersection, it is replaced. This
 // should allow for reloading (and eventual GC of old plugins as they are replaced) if need be.
-func (e *Engine) addPlugin(p *Plugin) {
+func (e *Engine) addPlugin(p *plugin, plug gopdk.Plugin) {
 	if nil != e.plugins && nil != p {
-		pv := e.plugins[p.Details.Name]
+		pv := e.plugins[plug.Name]
 
 		if nil == pv {
-			pv = make(map[string]*Plugin, 0)
-			e.plugins[p.Details.Name] = pv
+			pv = make(map[string]*plugin)
+			e.plugins[plug.Name] = pv
 		}
 
-		pv[p.Details.Version] = p
+		pv[plug.Version] = p
+		p.LoadOnStart = plug.LoadOnStart
 
 		// now add all of this plugins extensions to the unresolved list... a call to engine.resolve() will then try to
 		// find/resolve all extensions and subsequently resolve all plugins
-		if nil != p.Details.Extensions && len(p.Details.Extensions) > 0 {
-			for _, ex := range p.Details.Extensions {
-				ee := &Extension{
+		if nil != plug.Extensions && len(plug.Extensions) > 0 {
+			for _, ex := range plug.Extensions {
+				ee := &extension{
 					Extension: ex,
 					Plugin:    *p,
 					Resolved:  false,
 				}
 
+				// for each extension, add a reference pointer to THIS plugin so that when calling any extension
+				// that is part of the same plugin owner, the pointer to the extism.Plugin instance can be used.
+				if callableExtensions[ex.Id] != nil {
+					fmt.Println("It appears an extension is already added to the callableExtensions at id: ", ex.Id)
+				} else {
+					callableExtensions[ex.Id] = p
+				}
 				e.unresolved = append(e.unresolved, ee)
 			}
 		}
 
 		// now add all the plugins extension points to the engines extension points using the ExtensionPoint object
 		// that will tie this plugin instance to it as well.
-		if nil != p.Details.ExtensionPoints && len(p.Details.ExtensionPoints) > 0 {
-			for _, ep := range p.Details.ExtensionPoints {
-				eep := &ExtensionPoint{
+		if nil != plug.ExtensionPoints && len(plug.ExtensionPoints) > 0 {
+			for _, ep := range plug.ExtensionPoints {
+				eep := &extensionPoint{
 					ExtensionPoint: ep,
 					Func:           nil,
 					Extensions:     nil,
@@ -127,7 +135,7 @@ func (e *Engine) addPlugin(p *Plugin) {
 
 				eps := e.extensionPoints[ep.Id]
 				if nil == eps {
-					eps = make([]*ExtensionPoint, 0)
+					eps = make([]*extensionPoint, 0)
 				}
 
 				eps = append(eps, eep)
@@ -136,6 +144,8 @@ func (e *Engine) addPlugin(p *Plugin) {
 			}
 		}
 	}
+
+	e.resolve()
 }
 
 // validateVersion
@@ -171,6 +181,19 @@ func isValidNumber(str string) bool {
 		}
 	}
 	return true
+}
+
+// GetExtensionForId
+//
+// This function will look for a single extension based on it's id (and version?) and return it if found, nil otherwise
+func (e *Engine) GetExtensionForId(eid string) *gopdk.Extension {
+	ext := e.extensions[eid]
+
+	if nil != ext && ext.Resolved {
+		return &ext.Extension
+	}
+
+	return nil
 }
 
 // GetExtensionsForExtensionPoint
@@ -210,6 +233,7 @@ func (e *Engine) GetExtensionsForExtensionPoint(epoint string, versions []string
 						return exts, nil
 					}
 				} else {
+					fmt.Println("Looking at range from lower to upper: ", lowerVersion, upperVersion)
 					// we have a range of versions so the epVer.Version needs to be >= lowerVersion and <= upperVersion
 				}
 			}
@@ -225,47 +249,219 @@ func (e *Engine) GetExtensionsForExtensionPoint(epoint string, versions []string
 	return nil, errors.New("no extensions found for extension point")
 }
 
+// getPluginName
+// the source will be a .zip or .tar.gz so we'll remove those first, then look for the first / and get the name from
+// everything past the / to the end
+func getPluginName(source string) string {
+	var name string
+	if strings.HasSuffix(source, ".tar.gz") {
+		name = source[:len(source)-7]
+	} else if strings.HasSuffix(source, ".zip") {
+		name = source[:len(source)-4]
+	} else {
+		// TODO: Log that the source file is NOT a .zip or .tar.gz
+		return ""
+	}
+
+	// make sure we got a valid string still after removal of suffix
+	if len(name) > 0 {
+		indx := strings.LastIndex(name, string(filepath.Separator))
+		if indx >= 0 {
+			name = name[indx+1:]
+			return name
+		}
+	}
+
+	return ""
+}
+
+// loadPluginManifests
+//
+// This receiver function will be called to find all .tar.gz and .zip plugins at the provided path. It will determine if
+// it's a .tar.gz or .zip and use the appropriate helper func to untar/unzip to the engine's pluginPath output location
+// on the local file system. This extraction is necessary so that the .yaml (or .json (tbd)) can be parsed to pull the
+// plugin details, as well as record the location of the .wasm plugin for later use when the plugin is instantiated.
+func (e *Engine) loadPluginManifests(path string) error {
+	// Hardcode WASM extension as it's the only plugin module format supported.
+	files, err := findFilesWithExtensions(path, []string{".gz", ".zip"})
+
+	if err != nil {
+		// Handle error
+		fmt.Println("Some sort of error looking for .tar.gz or .zip plugin archive files: ", err)
+		return err
+	}
+
+	// we need to extract the plugin archives to the plugin engine provided output path
+	for _, file := range files {
+		f := getPluginName(file)
+
+		outputPath := filepath.Join(e.pluginPath, f)
+
+		if strings.HasSuffix(file, ".tar.gz") {
+			err = Untar(file, outputPath)
+			if err != nil {
+				// TODO: Log error.. but do NOT return because other plugins can still be extracted/loaded and work fine
+				fmt.Println("Error unzipping .tar.gz plugin: ", file, err)
+			}
+		} else if strings.HasSuffix(file, ".zip") {
+			err = Unzip(file, outputPath)
+			if err != nil {
+				// TODO: Log error.. but do NOT return because other plugins can still be extracted/loaded and work fine
+				fmt.Println("Error unzipping zip plugin: ", file, err)
+			}
+		}
+
+		// Because an error could occur, but we're in a loop that needs to process potentially multiple plugins, we're
+		// checking if the error is nil
+		if nil == err {
+			// looking for the extracted yaml plugin descriptor manifest file
+			files, err := findFilesWithExtensions(outputPath, []string{".yaml"})
+			if nil != err {
+				fmt.Println("Error trying to find YAML plugin manifest files")
+			} else if len(files) > 0 {
+				for _, f := range files {
+					// grab the base path where the plugin was extracted
+					base, _ := filepath.Split(f)
+
+					// get the WASM file
+					wasm, err2 := findFilesWithExtensions(base, []string{".wasm"})
+					if nil != err2 {
+						fmt.Println("Error walking base path: ", err2)
+					}
+
+					// read the bytes of the configuration file in
+					data, err := os.ReadFile(f)
+					if err != nil {
+						fmt.Println("Error reading file:", err)
+					}
+
+					p := gopdk.Plugin{}
+					err = yaml.Unmarshal(data, &p)
+
+					if nil != err {
+						fmt.Println("Got error unmarshalling: ", err)
+					} else {
+						plug := &plugin{
+							PathToModule: wasm[0],
+							Plugin:       nil,
+							Resolved:     false,
+						}
+
+						// register plugin, extension points and extensions
+						e.addPlugin(plug, p)
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// instantiate
+//
+// this function will create the plugin instance and call the plugin's start lifecycle exported function. This
+// function should be called when another plugin's extension function is to be called and the plugin is not yet created
+func (e *Engine) instantiate(plugin *plugin) error {
+	ctx := e.context
+	compilationCache := wazero.NewCompilationCache()
+	defer func(cache wazero.CompilationCache, ctx context.Context) {
+		err := cache.Close(ctx)
+		if err != nil {
+
+		}
+	}(compilationCache, ctx)
+
+	config := extism.PluginConfig{
+		EnableWasi:    true,
+		ModuleConfig:  wazero.NewModuleConfig(),
+		RuntimeConfig: wazero.NewRuntimeConfig().WithCompilationCache(compilationCache),
+		LogLevel:      e.logLevel,
+	}
+
+	manifest := extism.Manifest{
+		Wasm: []extism.Wasm{
+			extism.WasmFile{
+				Path: plugin.PathToModule,
+			},
+		},
+	}
+
+	pluginInstance, err := extism.NewPlugin(ctx, manifest, config, nil)
+
+	if err != nil {
+		fmt.Printf("Failed to initialize plugin: %v\n", err)
+	}
+
+	plugin.Plugin = pluginInstance
+
+	_, _, err = pluginInstance.Call("start", nil)
+
+	if nil != err {
+		fmt.Println("Error calling plugin: ", err)
+	}
+	//} else {
+	//	return errors.New("can not instantiate a plugin that is not yet resolved: " + plugin.Details.Id)
+	// }
+
+	return nil
+}
+
+// Start
+//
+// This method is called by an application to start the engine. This should occur after the Load() has finished and all
+// plugins are found/parsed/resolved. Start will cycle through all plugins to find any with a startOnLoad flag which
+// would indicate the plugin should be instantiated. For plugins that do not have startOnLoad set, they will be
+// instantiated when first used via a call to an extension.
+func (e *Engine) Start() error {
+	for _, plugin := range e.plugins {
+		if len(plugin) > 0 {
+			for _, verPlugin := range plugin {
+				if verPlugin.LoadOnStart {
+					err := e.instantiate(verPlugin)
+
+					if nil != err {
+						fmt.Println("Error instantiating plugin: ", err)
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
 // Load
+//
+// This recv/func is going to load plugins found in the provided path on the local filesystem. This path should be an
+// absolute path on a local file system or a URL to an archived plugin file. The archive needs to be in a .tar.gz or
+// .zip format. If the path provided is an http/https location, it will download the plugin to the engine plugin path
+// and then unzip/untar it there.
 func (e *Engine) Load(path string) error {
 	// First make sure that path is NOT a URL to a single plugin file
 	lower := strings.ToLower(path)
 	if strings.HasPrefix(lower, "http") {
 		// This is a URL
 		u, err := url.Parse(lower)
-		// todo: load URL path
-		fmt.Println("err,u: ", u, err)
+		fmt.Println("u, err: ", u, err)
+		// return for now as nil since we're not doing URLs yet
+		// TODO: FIX THIS
+		return nil
 	}
 
-	base, er := os.Getwd()
-	if er != nil {
-		return er
-	}
-
-	newpath := filepath.Join(base, lower)
-
-	// Hardcode WASM extension as it's the only plugin module format supported.
-	files, err := findFilesWithExtensions(newpath, []string{".wasm"})
-
+	base, err := os.Getwd()
 	if err != nil {
-		// Handle error
 		return err
 	}
 
-	ctx := context.Background()
-	cache := wazero.NewCompilationCache()
-	defer func(cache wazero.CompilationCache, ctx context.Context) {
-		err := cache.Close(ctx)
-		if err != nil {
+	newPath := filepath.Join(base, lower)
 
-		}
-	}(cache, ctx)
-
-	config := extism.PluginConfig{
-		EnableWasi:    true,
-		ModuleConfig:  wazero.NewModuleConfig(),
-		RuntimeConfig: wazero.NewRuntimeConfig().WithCompilationCache(cache),
-		LogLevel:      extism.LogLevelDebug,
+	err = e.loadPluginManifests(newPath)
+	if nil != err {
+		fmt.Println("Error loading plugins")
 	}
+
+	// unzip file(s) to local output path
 
 	// this is defined here because when a plugin module is loaded the extism.Plugin instance is assigned during the
 	// host func registerPlugin call.. but as that is a call back, the definition has no instance of the actual
@@ -286,7 +482,6 @@ func (e *Engine) Load(path string) error {
 		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
 			ep, err2 := p.ReadString(stack[0])
 
-			fmt.Println("WE ARE CALLING GET EXTENSION FOR EXTENSION POINT.. EP IS ", ep)
 			if nil != err2 {
 				// TODO: Figure out how to handle this correctly
 				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST getExtensionsForExtensionPoint FUNCTION: ", err2)
@@ -298,15 +493,22 @@ func (e *Engine) Load(path string) error {
 				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST getExtensionsForExtensionPoint FUNCTION: ", err2)
 			}
 
-			fmt.Println("VERSION FOR EP IS ", ver)
-			exts, err := e.GetExtensionsForExtensionPoint(ep, nil)
+			exts, err := e.GetExtensionsForExtensionPoint(ep, strings.Split(ver, ","))
 			if nil != err {
 				fmt.Println("ERROR IN HOST FUNC: ", err)
 			}
-			if nil != exts && len(exts) > 0 {
-				for _, ext := range exts {
-					fmt.Println("We're seeing if ext makes sense: ", ext.Id, ext.Name, ext.Func)
-				}
+
+			bytes, err := json.Marshal(exts)
+			if nil != err {
+				fmt.Println("ERROR marshalling extensions: ", err)
+			}
+
+			ff, err := p.WriteBytes(bytes)
+			stack[0] = ff
+
+			if err != nil {
+				fmt.Println("Error writing bytes: ", err)
+				return
 			}
 		},
 		[]extism.ValueType{extism.ValueTypeI64, extism.ValueTypeI64}, []extism.ValueType{extism.ValueTypeI64},
@@ -316,72 +518,57 @@ func (e *Engine) Load(path string) error {
 	callExtension := extism.NewHostFunctionWithStack(
 		"callExtension",
 		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
-			_, err2 := p.ReadBytes(stack[0])
-			if nil != err2 {
-				// TODO: Figure out how to handle this correctly
-				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST callExtension FUNCTION: ", err2)
+			eid, err := p.ReadString(stack[0])
+
+			if nil != err {
+				fmt.Println("Error reading string of stack[0] extension id: ", err)
+				// Maybe set the error on the plugin return value?
+				// p.WriteString("Error: " + err.Error())
+				// stack[0] = len("Error: " + err.Error())
+				return
+			}
+
+			funcName, err := p.ReadString(stack[1])
+			if nil != err {
+				fmt.Println("Error reading string of stack[0] extension id: ", err)
+				// Maybe set the error on the plugin return value?
+				// p.WriteString("Error: " + err.Error())
+				// stack[0] = len("Error: " + err.Error())
+				return
+			}
+
+			data, err := p.ReadBytes(stack[2])
+			if nil != err {
+				fmt.Println("Error reading string of stack[0] extension id: ", err)
+				// Maybe set the error on the plugin return value?
+				// p.WriteString("Error: " + err.Error())
+				// stack[0] = len("Error: " + err.Error())
+				return
+			}
+
+			ext := e.GetExtensionForId(eid)
+			if nil != ext {
+				status, data, err := callingPlugin.Call(funcName, data)
+				if nil != err {
+					fmt.Println("Err calling plugin extension from in host func callExtension : ", err)
+				}
+
+				if status == 0 {
+					ff, err := p.WriteBytes(data)
+					if err != nil {
+						fmt.Println("Error writing response byte data from plugin call in callExtension : ", err)
+					}
+
+					stack[0] = ff
+				}
 			}
 		},
-		[]extism.ValueType{extism.ValueTypeI64}, []extism.ValueType{extism.ValueTypeI64},
+		[]extism.ValueType{extism.ValueTypeI64, extism.ValueTypeI64, extism.ValueTypeI64}, []extism.ValueType{extism.ValueTypeI64},
 	)
 	callExtension.SetNamespace("extism:host/user")
 
-	registerPlugin := extism.NewHostFunctionWithStack("registerPlugin",
-		func(ctx context.Context, p *extism.CurrentPlugin, stack []uint64) {
-			data, err := p.ReadBytes(stack[0])
-			if nil != err {
-				// TODO: Figure out how to handle this correctly
-				fmt.Println("ERROR CALLING FROM PLUGIN TO HOST registerPlugin FUNCTION: ", err)
-			}
-
-			plugin := &types.Plugin{}
-			err = json.Unmarshal(data, plugin)
-			if nil != err {
-				fmt.Println("A PLUGIN IS BEING REGISTERED VIA CALLBACK HOST FUNC: ", plugin.Id, plugin.Name)
-			} else {
-				newPlugin := &Plugin{
-					Details:  *plugin,
-					Plugin:   callingPlugin,
-					Resolved: false,
-				}
-
-				e.addPlugin(newPlugin)
-			}
-		},
-
-		[]extism.ValueType{extism.ValueTypeI64}, []extism.ValueType{extism.ValueTypeI64},
-	)
-	registerPlugin.SetNamespace("extism:host/user")
-
 	// add host functions
-	hostFuncs := []extism.HostFunction{getExtensionsForExtensionPoint, callExtension, registerPlugin}
-
-	for _, file := range files {
-		fmt.Println(file)
-		manifest := extism.Manifest{
-			Wasm: []extism.Wasm{
-				extism.WasmFile{
-					Path: file,
-				},
-			},
-		}
-
-		callingPlugin, err = extism.NewPlugin(ctx, manifest, config, hostFuncs)
-
-		if err != nil {
-			fmt.Printf("Failed to initialize plugin: %v\n", err)
-			continue
-		}
-
-		_, _, err = callingPlugin.Call("start", nil)
-
-		if nil != err {
-			fmt.Println("Error calling plugin: ", err)
-			continue
-		} else {
-			fmt.Println("WE CALLED IT")
-		}
-	}
+	// hostFuncs := []extism.HostFunction{getExtensionsForExtensionPoint, callExtension, registerPlugin}
 
 	e.resolve()
 	return nil
@@ -394,27 +581,23 @@ func (e *Engine) Load(path string) error {
 // are resolved will a plugin's status change to resolved.
 func (e *Engine) resolve() {
 	if nil != e.unresolved && len(e.unresolved) > 0 {
-		leftover := make([]*Extension, 0)
+		leftover := make([]*extension, 0)
 		for _, v := range e.unresolved {
-			// mkae sure the status is unresolved
+			// make sure the status is unresolved
 			if !v.Resolved {
 				// find extension point this extension anchors to
 				eps := e.extensionPoints[v.ExtensionPoint]
 				if nil != eps && len(eps) > 0 {
 					for _, ep := range eps {
-						fmt.Println("Checking if ep resolves: ", v.ExtensionPoint, ep.Id)
 						if v.ExtensionPoint == ep.Id {
-							fmt.Println("We found a match: ", ep.Name)
 							ep.Extensions = append(ep.Extensions, v)
 							v.Resolved = true
-							e.extensions[v.Name] = v
+							e.extensions[v.Id] = v
 						} else {
 							// not found, append to leftover
 							leftover = append(leftover, v)
 						}
 					}
-				} else {
-					fmt.Println("Looks like extension point not yet loaded: ", v.ExtensionPoint)
 				}
 			}
 		}
@@ -431,8 +614,8 @@ func (e *Engine) resolve() {
 // Ideally a host/client app may ship/install/start with plugins already, but this gives the ability for the host/client
 // to have native code functions tied to extension points that are then filled by plugin extensions.
 func (e *Engine) RegisterHostExtensionPoint(id, name, version, description string) {
-	ep := &ExtensionPoint{
-		ExtensionPoint: types.ExtensionPoint{
+	ep := &extensionPoint{
+		ExtensionPoint: gopdk.ExtensionPoint{
 			Id:          id,
 			Description: description,
 			Name:        name,
@@ -442,36 +625,37 @@ func (e *Engine) RegisterHostExtensionPoint(id, name, version, description strin
 
 	exps := e.extensionPoints[id]
 	if nil == exps {
-		exps = make([]*ExtensionPoint, 0)
+		exps = make([]*extensionPoint, 0)
 	}
 
 	exps = append(exps, ep)
 	// reassign because exps may be a new larger ref.. has to be reassigned
 	e.extensionPoints[id] = exps
+	e.resolve()
 }
 
-func (e *Engine) GetPlugins() map[string]map[string]*Plugin {
+func (e *Engine) GetPlugins() map[string]map[string]*plugin {
 	return e.plugins
 }
 
-func (e *Engine) CallExtensionFunc(ex gopdk.Extension, data []byte) ([]byte, error) {
-	for _, ext := range e.extensions {
-		if ext.Name == ex.Name {
+func (e *Engine) CallExtensionFunc(extensionId string, data []byte) ([]byte, error) {
+	callable := callableExtensions[extensionId]
 
-			p := ext.Plugin
-
-			if nil == p.Plugin {
-				fmt.Println("UH OH the plugin instance is nil")
+	if nil != callable {
+		extension := e.extensions[extensionId]
+		if nil == callable.Plugin {
+			fmt.Println("Instantiating plugin: ", extensionId)
+			if err := e.instantiate(callable); err != nil {
+				fmt.Println("Problem instantiating callable plugin: ", extension.Func)
 			}
-
-			_, data, err := p.Plugin.Call(ext.Func, data)
-			if nil != err {
-				fmt.Println("Error calling extension func: ", ex.Name, err)
-				return nil, err
-			}
-
-			return data, nil
 		}
+
+		_, d, err := callable.Plugin.Call(extension.Func, data)
+		if nil != err {
+			return nil, err
+		}
+
+		return d, nil
 	}
 
 	return nil, nil
@@ -482,20 +666,29 @@ func (e *Engine) CallExtensionFunc(ex gopdk.Extension, data []byte) ([]byte, err
 // This function will create a new plugin engine instance. Passed in are host functions per the Extism (WASI)
 // Host Function spec. This allows consumers of this engine to provide its own host functions that plugins will be
 // able to utilize along with the plugin engine host functions.
-func NewPluginEngine(hostFuncs []extism.HostFunction) *Engine {
-	plugins := make(map[string]map[string]*Plugin)
-	unresolved := make([]*Extension, 0)
-	extensionPoints := make(map[string][]*ExtensionPoint)
-	extensions := make(map[string]*Extension)
+func NewPluginEngine(hostFuncs []extism.HostFunction, logLevel extism.LogLevel, pluginOutputPath string) (*Engine, error) {
+	plugins := make(map[string]map[string]*plugin)
+	unresolved := make([]*extension, 0)
+	extensionPoints := make(map[string][]*extensionPoint)
+	extensions := make(map[string]*extension)
+
+	// verify that the pluginPath exists and/or if not created.. is created
+	err := os.MkdirAll(pluginOutputPath, 0660)
+	if err != nil {
+		return nil, errors.New("a problem trying to create the plugin output path (" + pluginOutputPath + ") : " + err.Error())
+	}
 
 	// instantiate as we need this in the host functions
 	engine := &Engine{
+		context:         context.Background(),
+		logLevel:        logLevel,
 		plugins:         plugins,
 		unresolved:      unresolved,
 		hostFuncs:       hostFuncs,
 		extensions:      extensions,
 		extensionPoints: extensionPoints,
+		pluginPath:      pluginOutputPath,
 	}
 
-	return engine
+	return engine, nil
 }
