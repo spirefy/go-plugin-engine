@@ -381,7 +381,7 @@ func (e *Engine) instantiate(plugin *plugin) error {
 	defer func(cache wazero.CompilationCache, ctx context.Context) {
 		err := cache.Close(ctx)
 		if err != nil {
-
+			fmt.Println("Error closing cache: ", err)
 		}
 	}(compilationCache, ctx)
 
@@ -471,7 +471,7 @@ func (e *Engine) Load(path string) error {
 
 	err = e.loadPluginManifests(newPath, "")
 	if nil != err {
-		fmt.Println("Error loading plugins")
+		fmt.Println("Error loading plugins: ", err)
 	}
 
 	e.resolve()
