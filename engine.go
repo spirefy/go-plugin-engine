@@ -4,16 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	extism "github.com/extism/go-sdk"
-	gopdk "github.com/spirefy/go-pdk"
-	"github.com/tetratelabs/wazero"
-	"gopkg.in/yaml.v3"
 	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"unicode"
+
+	extism "github.com/extism/go-sdk"
+	gopdk "github.com/spirefy/go-pdk"
+	"github.com/tetratelabs/wazero"
+	"gopkg.in/yaml.v3"
 )
 
 type (
@@ -389,7 +390,6 @@ func (e *Engine) instantiate(plugin *plugin) error {
 		EnableWasi:    true,
 		ModuleConfig:  wazero.NewModuleConfig(),
 		RuntimeConfig: wazero.NewRuntimeConfig().WithCompilationCache(compilationCache),
-		LogLevel:      e.logLevel,
 	}
 
 	manifest := extism.Manifest{
